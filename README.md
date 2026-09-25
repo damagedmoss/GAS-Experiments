@@ -183,6 +183,17 @@ Pre-trained **GS** and **GAS** checkpoints are available at [Hugging Face Hub](h
 ## Citation
 
 ```bibtex
+@inproceedings{oganov2026gas,
+  title={GAS: Improving Discretization of Diffusion ODEs via Generalized Adversarial Solver},
+  author={Oganov, Aleksandr and Bykov, Ilya and Neudachina, Eva and Aliev, Mishan and Tolmachev, Alexander and Sidorov, Alexander and Aleksandr, Zuev and Okhotin, Andrei and Rakitin, Denis and Alanov, Aibek},
+  booktitle={International Conference on Learning Representations},
+  volume={2026},
+  pages={39711--39747},
+  year={2026}
+}
+```
+
+```bibtex
 @misc{oganov2025gasimprovingdiscretizationdiffusion,
       title={GAS: Improving Discretization of Diffusion ODEs via Generalized Adversarial Solver}, 
       author={Aleksandr Oganov and Ilya Bykov and Eva Neudachina and Mishan Aliev and Alexander Tolmachev and Alexander Sidorov and Aleksandr Zuev and Andrey Okhotin and Denis Rakitin and Aibek Alanov},
