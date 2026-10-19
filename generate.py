@@ -162,7 +162,7 @@ def main(
     if gs_solver:
         solver_config.loss_config.loss_type = "GS"
         solver_config.steps = num_steps
-        solver_config.order = num_steps
+        solver_config.order = 1
 
         gs_wrapper = get_gs_wrapper(model, solver_config)
         gs_wrapper.load_checkpoint(checkpoint_path=checkpoint_path)
@@ -172,7 +172,7 @@ def main(
     else:
         if num_steps is not None:
             solver_config.steps = num_steps
-
+        
         sampler_fn = SAMPLING_ALGS[model_config.type]
         sampler_fn = partial(sampler_fn, model=model, solver_config=solver_config)
 

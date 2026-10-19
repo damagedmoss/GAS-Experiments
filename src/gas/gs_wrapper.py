@@ -13,40 +13,40 @@ from src.gas.adversarial_module.dist_adv_loss import DistAdversarialTraining
 from src.gas.synt_data import SyntDataType
 
 class GSWrapper(nn.Module):
-    """Generalised Solver wrapper. 
-    
-    This class integrates all the logic needed to train or evaluate 
-    the given generative model using Generalised Solver. 
-    
+    """Generalised Solver wrapper.
+
+    This class integrates all the logic needed to train or evaluate
+    the given generative model using Generalised Solver.
+
     Method `student_sampler_fn` is used to call the sampler.
     Method `forward` is called in the training loop to calculate the losses.
         The model can be trained in both default or adversarial modes.
-    
+
     Attributes:
         model (BaseModel): Underlying model instance wrapped in BaseModel interface.
         solver_config (ConfigDict): Solver configuration dictionary.
         solver (GeneralizedSolver): Generalised Solver instance that is trained/evaluated.
-        
+
         loss_fn_vgg (nn.Module): VGG model instance to calculate LPIPS loss.
-        adv_loss (DistAdversarialTraining): Adversarial training class instance. 
+        adv_loss (DistAdversarialTraining): Adversarial training class instance.
     """
-    
+
     def __init__(self, model: BaseModel, solver_config: ConfigDict):
         """Initialize the Generalised Solver wrapper.
-    
+
         Args:
-            model (BaseModel): Instance of a BaseModel class. 
-                Its `decode`, `set_condition` methods and 
+            model (BaseModel): Instance of a BaseModel class.
+                Its `decode`, `set_condition` methods and
                 `model_fn`, `ns` and `t_eps` attributes are used.
             solver_config (ConfigDict): Solver configuration dictionary.
-                Must include steps, order, loss_config, 
+                Must include steps, order, loss_config,
                 t_parametrization and use_theory_coef.
         """
         super().__init__()
         self.model = model
         self.solver_config = solver_config
         self.t_eps = self.model.t_eps
-        
+
         # create lpips
         self.loss_fn_vgg = lpips.LPIPS(net='vgg').requires_grad_(False)
         self.loss_fn_vgg.eval()
@@ -92,12 +92,12 @@ class GSWrapper(nn.Module):
             solver.__setattr__(aname, self.__getattr__(aname))
 
         # theory coef
-        if not self.solver_config.use_theory_coef:
-            assert self.solver_config.mode in ["wo_guidance", "S4S", "S4S_PC"]
-            solver.mode = self.solver_config.mode
+        solver.use_theory_coef = self.solver_config.use_theory_coef
+        if not solver.use_theory_coef:
             solver.init_coefs(
                 steps=self.steps,
-                order=self.order
+                order=self.order,
+                timesteps=self.get_t_steps()
             )
         # end init solver
         self.solver = solver
@@ -109,9 +109,9 @@ class GSWrapper(nn.Module):
             return torch.tensor([1., self.t_eps], device=self.mu_logit.device)
         logits = self.mu_logit
         t = self.get_mu_t_steps(logits)
-        
+
         return t.flip(0)
-    
+
     def get_mu_t_steps(self, mu_logit: torch.Tensor) -> torch.Tensor:
         """Use stick-breaking transform for getting timesteps from logits.
         Timesteps are calculated following Eq. 14 from the GAS paper.
@@ -131,7 +131,7 @@ class GSWrapper(nn.Module):
             ]
         )
         return t_steps
-    
+
     def get_inv_t_steps(self, t_steps) -> torch.Tensor:
         """Function to inverse initialized timesteps."""
         t_steps = t_steps[1:-1]
@@ -140,7 +140,7 @@ class GSWrapper(nn.Module):
         t_steps = (t_steps - self.eps_mu_offset) / (1 - 2 * self.eps_mu_offset)
 
         return t_steps.logit()
-    
+
     # utilities
     def load_checkpoint(self, checkpoint_path: str) -> None:
         """Loads EMA parameters checkpoint."""
@@ -160,21 +160,23 @@ class GSWrapper(nn.Module):
 
     # solvers
     def get_base_solver(self) -> GeneralizedSolver:
-        """Initialises Generalized Solver from model_fn 
+        """Initialises Generalized Solver from model_fn
         and noise scheduler of the BaseModel instance.
         """
         solver = GeneralizedSolver(
             model_fn=self.model.model_fn,
             noise_schedule=self.model.ns,
+            steps=self.solver_config.steps,
+            channels=3,
         )
         return solver
 
     def student_sampler_fn(self, noise: torch.Tensor, **kwargs) -> Tuple[Optional[torch.Tensor], torch.Tensor]:
-        """Calls `sample` method of the Generalised Solver. 
-        
+        """Calls `sample` method of the Generalised Solver.
+
         Args:
             noise (torch.Tensor): An initial noise tensor to start sampling process from.
-        
+
         Returns:
             None: A placeholder for consistency with latent models.
             torch.tensor: Sampled images
@@ -185,22 +187,22 @@ class GSWrapper(nn.Module):
             order=self.order,
         )
         return None, images
-    
+
     # training function
     def forward(self, batch: SyntDataType, return_timesteps: bool = False, is_train: bool = True) -> dict:
         """Forward function used in training loop. Evaluates solver and calculates losses.
-        
+
         Args:
-            batch (SyntDataType): Dataset tuple of size 4. 
+            batch (SyntDataType): Dataset tuple of size 4.
                 First two arguments are treated like torch.Tensor noise and images samples.
                 Second two arguments are optional and can be used in GSWrapperLatent for latent diffusion models.
                 They are treated as latents tensors and conditions.
             return_timesteps (bool): Flag whether to return timestep of the current step.
-            is_train (bool): Flag whether forward is called in the train loop. 
+            is_train (bool): Flag whether forward is called in the train loop.
                 Used in `discriminator_step` method of an DistAdversarialTraining instance.
-            
+
         Returns:
-            dict: Dictionary of all losses and model outputs. 
+            dict: Dictionary of all losses and model outputs.
                 Has `loss_total` key as a weighted sum of adversarial and distillation losses.
         """
         assert len(batch) == 4, f"len(batch) is expected to be 4, yours is {len(batch)}"
@@ -246,15 +248,15 @@ class GSWrapper(nn.Module):
             d['gen_signs_fake'] = res[1].sign()
 
             assert d['gen_loss_adv'].shape == d[self.loss_config.loss_key].shape, f"""
-                Shape of generator loss is not equal to distillation loss shape. 
+                Shape of generator loss is not equal to distillation loss shape.
                 ({d['gen_loss_adv'].shape} vs {d[self.loss_config.loss_key].shape}).
             """
 
         d['loss_total'] = self.loss_config.disc_weight * d.get('gen_loss_adv', 0.) + d[self.loss_config.loss_key]
 
         return d
-    
-    
+
+
 class GSWrapperLatent(GSWrapper):
     """Generalised Solver wrapper adapted for latent models."""
     def __init__(self, model: nn.Module, solver_config: ConfigDict):
@@ -266,11 +268,11 @@ class GSWrapperLatent(GSWrapper):
         decode: bool = False,
         condition: Any = None,
     ) -> Tuple[torch.Tensor, Optional[torch.Tensor]]:
-        """Calls `sample` method of the Generalised Solver. 
-        
+        """Calls `sample` method of the Generalised Solver.
+
         Args:
             noise (torch.Tensor): An initial noise tensor to start sampling process from.
-        
+
         Returns:
             torch.Tensor: Predicted latents that are the direct output of the model.
             Optional[torch.Tensor]: Predicted images (decoded latents).
@@ -290,7 +292,7 @@ class GSWrapperLatent(GSWrapper):
             images = self.model.decode(latents)
 
         return latents, images
-    
+
     def forward(self, batch: SyntDataType, return_timesteps: bool = False, is_train: bool = True) -> dict:
         assert len(batch) == 4, f"len(batch) is expected to be 4, yours is {len(batch)}"
         noise, images, latents, condition = batch
