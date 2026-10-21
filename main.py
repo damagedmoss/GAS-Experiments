@@ -1,4 +1,3 @@
-import comet_ml
 import click
 import torch
 import yaml
@@ -70,7 +69,7 @@ def main(
     solver_config = config.student_solver_config
     solver_config.loss_config.loss_type = loss_type
     solver_config.steps = student_step
-    solver_config.order = student_step
+    solver_config.order = 3
 
     solver_config.student_name = "_".join(
         f"{k}={v}" for k, v in solver_config.items() if k != "loss_config"
