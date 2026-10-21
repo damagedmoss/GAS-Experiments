@@ -1,9 +1,10 @@
 import torch
+import torch.nn as nn
 from typing import List, Tuple, Optional, Any
 
 from src.gas.solver_utils import NoiseScheduleVP
 
-class GeneralizedSolver:
+class GeneralizedSolver(nn.Module):
     """Generalized solver for diffusion ODE using theoretical guidance from DPM-Solver.
     
     Implements framework for solving diffusion ODE with support for multiple orders 
@@ -11,18 +12,84 @@ class GeneralizedSolver:
     and calculating standard theoretical coefficients.
     """
     
-    def __init__(self, model_fn: Any, noise_schedule: NoiseScheduleVP):
-        """Initialize the Generalized Solver for Generalised Solver wrapper.
-        
+    def __init__(
+        self,
+        model_fn: Any,
+        noise_schedule: NoiseScheduleVP,
+        steps: int,
+        channels: int = 3,
+    ):
+        """Initialize the solver and learned depthwise corrections.
+
         Args:
-            model_fn (model_wrapper.model_fn): A noise prediction model function, 
-                which accepts the continuous-time input.
-            noise_schedule (NoiseScheduleVP): Noise scheduler.
+            model_fn: Noise-prediction model.
+            noise_schedule: Noise scheduler.
+            steps: Maximum number of sampling steps / NFEs.
+            channels: Number of channels in x and model outputs. CIFAR-10 uses 3.
         """
+        super().__init__()
+
         self.model_class = model_fn
         self.noise_schedule = noise_schedule
-
         self.mode = "GS"
+
+        self.steps = steps
+        self.channels = channels
+
+        def make_step_convs(history_size: int) -> nn.ModuleList:
+            return nn.ModuleList(
+                [
+                    nn.Conv2d(
+                        in_channels=channels,
+                        out_channels=channels,
+                        kernel_size=3,
+                        padding=1,
+                        groups=channels,
+                        bias=False,
+                    )
+                    for _ in range(history_size)
+                ]
+            )
+
+        self.delta_a_convs = nn.ModuleList(
+            [make_step_convs(min(step + 1, 2)) for step in range(steps)]
+        )
+        self.delta_c_convs = nn.ModuleList(
+            [make_step_convs(min(step + 1, 2)) for step in range(steps)]
+        )
+
+        self.init_delta_convs()
+
+    @torch.no_grad()
+    def init_delta_convs(self) -> None:
+        """Initialize learned spatial corrections to zero, preserving baseline."""
+        for per_step_convs in (self.delta_a_convs, self.delta_c_convs):
+            for step_convs in per_step_convs:
+                for conv in step_convs:
+                    nn.init.zeros_(conv.weight)
+
+    def learned_corrections(
+        self,
+        x_prev_list: List[torch.Tensor],
+        model_prev_list: List[torch.Tensor],
+    ) -> torch.Tensor:
+        """Sum delta(A_j(x_j)) + delta(C_j(v_j)) for current step's history.
+
+        Index 0 refers to the most recent state/prediction, index 1 to
+        the preceding one. The two sets of kernels are independently trained
+        for each solver step.
+        """
+        delta_a_step = self.delta_a_convs[self.params_step]
+        delta_c_step = self.delta_c_convs[self.params_step]
+        history_size = len(delta_a_step)
+        assert len(x_prev_list) >= history_size
+        assert len(model_prev_list) >= history_size
+
+        correction = torch.zeros_like(x_prev_list[-1])
+        for j in range(history_size):
+            correction = correction + delta_a_step[j](x_prev_list[-1 - j])
+            correction = correction + delta_c_step[j](model_prev_list[-1 - j])
+        return correction
 
     def model_fn(self, x: torch.Tensor, t: torch.Tensor) -> torch.Tensor:
         """Convert the model to the data prediction model.
@@ -218,30 +285,17 @@ class GeneralizedSolver:
         return x_t    
 
     def first_update(
-        self, x: torch.Tensor, 
-        model_prev_list: List[torch.Tensor], 
-        t_prev_list: List[float], 
-        t: float, 
-        x_prev_list: List[torch.Tensor]
+        self,
+        x: torch.Tensor,
+        model_prev_list: List[torch.Tensor],
+        t_prev_list: List[float],
+        t: float,
+        x_prev_list: List[torch.Tensor],
     ) -> torch.Tensor:
-        """Perform a single first-order solver update for diffusion ODE.
-        Updates the solution using previous model outputs and states.
-
-        Args:
-            x (torch.Tensor): Current solution.
-            model_prev_list (List[torch.Tensor]): List of previous model outputs 
-                at corresponding times in `t_prev_list`.
-            t_prev_list (List[float]): List of previous time steps.
-            t (float): Next time for the update step.
-            order (int): Solver order (number of previous steps to use).
-            x_prev_list (List[torch.Tensor]): List of previous solution estimates 
-                at corresponding times in `t_prev_list`.
-
-        Returns:
-            torch.Tensor: Updated solution estimate at time t.
-        """
+        """First-order step with learned depthwise ΔA and ΔC corrections."""
         assert len(model_prev_list) == len(t_prev_list)
         assert len(x_prev_list) == len(t_prev_list)
+
         model_prev_0 = model_prev_list[-1]
         a_ii, alpha_t, (_, _), (phi_1, _, _) = self.calc_vals(t_prev_list, t)
 
@@ -249,7 +303,7 @@ class GeneralizedSolver:
         c1 = alpha_t * phi_1 + self.c1_diff[self.params_step]
 
         x_t = a1 * x - c1 * model_prev_0
-        return x_t
+        return x_t + self.learned_corrections(x_prev_list, model_prev_list)
 
     def second_update(
         self, 
@@ -286,8 +340,11 @@ class GeneralizedSolver:
         c1 = alpha_t * phi_1 + self.c1_diff[self.params_step]
         c2 = 0.5 * (alpha_t * phi_1) + self.c2_diff[self.params_step]
 
-        x_t = a1 * x - c1 * model_prev_0 - c2 * D1_0 
+        x_t = a1 * x - c1 * model_prev_0 - c2 * D1_0
         x_t = x_t + self.a2_diff[self.params_step] * x_prev_list[-2]
+
+        if self.mode == "GS":
+            x_t = x_t + self.learned_corrections(x_prev_list, model_prev_list)
         return x_t
 
     def unbound_update(
@@ -401,6 +458,9 @@ class GeneralizedSolver:
             torch.Tensor: The approximated solution.        
         """
         assert steps >= order
+        assert steps <= self.steps, (
+            f"sample steps ({steps}) exceed initialized conv steps ({self.steps})"
+        )
         self.params_step = 0
 
         # Init the initial values.
